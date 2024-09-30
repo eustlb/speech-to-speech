@@ -55,7 +55,7 @@ class AudioStreamingClient:
 
     def start_audio_streaming(self):
         self.send_thread = threading.Thread(target=self.send_audio)
-        self.play_thread = threading.Thread(target=self.play_audio)
+        # self.play_thread = threading.Thread(target=self.play_audio)
 
         self.input_stream = sd.InputStream(
             samplerate=self.args.sample_rate,
