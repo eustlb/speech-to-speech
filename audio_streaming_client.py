@@ -57,9 +57,26 @@ class AudioStreamingClient:
         self.send_thread = threading.Thread(target=self.send_audio)
         self.play_thread = threading.Thread(target=self.play_audio)
 
-        with sd.InputStream(samplerate=self.args.sample_rate, channels=1, dtype='int16', callback=self.audio_input_callback, blocksize=self.args.chunk_size):
-            self.send_thread.start()
-            self.play_thread.start()
+        self.input_stream = sd.InputStream(
+            samplerate=self.args.sample_rate,
+            channels=1,
+            dtype='int16',
+            callback=self.audio_input_callback,
+            blocksize=self.args.chunk_size
+        )
+        self.input_stream.start()
+
+        self.output_stream = sd.OutputStream(
+            samplerate=self.args.sample_rate,
+            channels=1,
+            dtype='int16',
+            callback=self.audio_out_callback,
+            blocksize=self.args.chunk_size
+        )
+        self.output_stream.start()
+
+        self.send_thread.start()
+        # self.play_thread.start()
 
     def on_open(self, ws):
         print("WebSocket connection opened.")
@@ -87,7 +104,12 @@ class AudioStreamingClient:
         self.send_thread.join()
         self.play_thread.join()
         self.ws.close()
-        self.ws_thread.join()
+        if hasattr(self, 'input_stream'):
+            self.input_stream.stop()
+            self.input_stream.close()
+        if hasattr(self, 'output_stream'):
+            self.output_stream.stop()
+            self.output_stream.close()
         print("Service shutdown.")
 
     def send_audio(self):
@@ -115,13 +137,15 @@ class AudioStreamingClient:
                 outdata[len(chunk_int16):] = 0
             else:
                 outdata[:, 0] = chunk_int16[:len(outdata)]
+                # If chunk is longer, put the remaining data back in the queue
+                if len(chunk_int16) > len(outdata):
+                    self.recv_queue.put(chunk_int16[len(outdata):])
         else:
             outdata[:] = 0
 
-    def play_audio(self):
-        with sd.OutputStream(samplerate=self.args.sample_rate, channels=1, dtype='int16', callback=self.audio_out_callback, blocksize=self.args.chunk_size):
-            while not self.stop_event.is_set():
-                time.sleep(0.1)
+    # def play_audio(self):
+    #     while not self.stop_event.is_set():
+    #         time.sleep(0.1)
 
 if __name__ == "__main__":
     import argparse
