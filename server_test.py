@@ -2,51 +2,63 @@ import asyncio
 from starlette.endpoints import WebSocketEndpoint
 from starlette.routing import Route, WebSocketRoute
 from starlette.applications import Starlette
+from starlette.responses import JSONResponse
 import numpy as np
-import base64
+import time
+from asyncio import Queue
 
-SAMPLE_RATE = 16000  # Assuming 16kHz sample rate
-ONE_SECOND_SAMPLES = SAMPLE_RATE
-CHUNK_SIZE = 1024  # Adjust as needed
-
-class AudioBuffer:
-    def __init__(self):
-        self.buffer = np.array([], dtype=np.int16)
-    
-    def add_chunk(self, chunk):
-        self.buffer = np.append(self.buffer, chunk)
-    
-    def get_duration(self):
-        return len(self.buffer) / SAMPLE_RATE
-    
-    def clear(self):
-        self.buffer = np.array([], dtype=np.int16)
-    
-    def get_audio(self):
-        return self.buffer.tobytes()
+SAMPLE_RATE = 16000  # Assuming 48kHz sample rate
+CHUNK_SIZE = 1024 * 10  # Adjust as needed
+BUFFER_DELAY = 10  # Delay in seconds to accumulate packets
 
 class WebSocketPredictEndpoint(WebSocketEndpoint):
     encoding = "bytes"
-    FIRST_RECEIVE = True
 
     async def on_connect(self, websocket):
         await websocket.accept()
         print("connected")
-        self.audio_buffer = AudioBuffer()
+        self.audio_queue = Queue()
+        self.start_event = asyncio.Event()
+        self.start_time_task = None
+        self.send_task = asyncio.create_task(self.send_audio(websocket))
 
     async def on_receive(self, websocket, data):
-        audio_chunk = np.frombuffer(data, dtype=np.int16) 
-        self.audio_buffer.add_chunk(audio_chunk)
-        
-        # Check if we have accumulated 5 seconds of audio
-        if self.audio_buffer.get_duration() >= 5.0:
-            print("5 seconds accumulated, sending back")
-            audio_data = self.audio_buffer.get_audio()
-            await websocket.send_bytes(audio_data)
-            self.audio_buffer.clear()
+        if data == b"DONE":
+            await websocket.send_bytes(b"DONE")
+            return
+        audio = np.frombuffer(data, dtype=np.int16)
+        audio_chunks = [audio[i:i+CHUNK_SIZE] for i in range(0, len(audio), CHUNK_SIZE)]
+        if len(audio) > 0:
+            for chunk in audio_chunks:
+                print(f"received {len(chunk) / SAMPLE_RATE} seconds")
+                await self.audio_queue.put(chunk)
+        else:
+            await websocket.send_bytes(b"DONE")
 
+        # If this is the first packet, start the delay timer
+        if not self.start_event.is_set() and not self.start_time_task:
+            self.start_time_task = asyncio.create_task(self.delay_start())
+
+    async def delay_start(self):
+        await asyncio.sleep(BUFFER_DELAY)
+        self.start_event.set()
+        print(f"Buffering for {BUFFER_DELAY} seconds completed. Starting to send audio.")
+
+    async def send_audio(self, websocket):
+        await self.start_event.wait()
+        while True:
+            if not self.audio_queue.empty():
+                audio_chunk = await self.audio_queue.get()
+                await websocket.send_bytes(audio_chunk.tobytes())
+         
     async def on_disconnect(self, websocket, close_code):
-        pass
+        self.send_task.cancel()
+        if self.start_time_task:
+            self.start_time_task.cancel()
+        try:
+            await self.send_task
+        except asyncio.CancelledError:
+            pass
 
 async def health(request):
     return JSONResponse({"status": "ok"})
